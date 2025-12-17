@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Log Producer</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f0f2f5; }
+        h1 { color: #333; }
+        
+        .container { max-width: 1200px; margin: 0 auto; }
+        
+        .panel { background-color: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .panel h3 { margin-top: 0; color: #555; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        
+        .control-group { display: flex; gap: 20px; align-items: center; margin-bottom: 15px; }
+        .control-group label { font-weight: 600; color: #444; }
+        input[type="number"] { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 80px; }
+        
+        button { padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: 600; transition: all 0.2s; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #startBtn { background-color: #4CAF50; color: white; border: none; }
+        #startBtn:hover:not(:disabled) { background-color: #45a049; }
+        #stopBtn { background-color: #f44336; color: white; border: none; }
+        #stopBtn:hover:not(:disabled) { background-color: #d32f2f; }
+
+        .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+        .metric { background: #f9f9f9; padding: 15px; border-radius: 6px; text-align: center; }
+        .metric label { display: block; color: #666; font-size: 0.9em; margin-bottom: 5px; }
+        .metric span { font-size: 1.5em; font-weight: bold; color: #333; }
+
+        /* Visualization Styles */
+        .flow-container { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; padding: 40px 20px; gap: 20px; overflow-x: auto; }
+        
+        .component { 
+            display: flex; flex-direction: column; align-items: center; cursor: pointer; 
+            transition: transform 0.2s; position: relative; z-index: 1;
+        }
+        .component:hover { transform: scale(1.1); }
+        .component-icon { 
+            width: 60px; height: 60px; background: #fff; border: 2px solid #3498db; border-radius: 50%; 
+            display: flex; justify-content: center; align-items: center; font-size: 24px; color: #3498db;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1); position: relative;
+        }
+        .component-label { margin-top: 10px; font-weight: 600; color: #555; }
+        .component-external-link {
+            position: absolute; bottom: -5px; right: -5px;
+            background: #2196F3; color: white; border-radius: 50%;
+            width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+            font-size: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .component-counter {
+            position: absolute; top: -10px; right: -10px; 
+            background-color: #ff5722; color: white; border-radius: 12px; padding: 2px 8px; 
+            font-size: 12px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            min-width: 15px; text-align: center;
+        }
+        
+        .arrow { flex-grow: 1; height: 4px; background: #e0e0e0; margin: 0 10px; position: relative; }
+        .arrow::after { content: ''; position: absolute; right: -8px; top: -6px; border: 8px solid transparent; border-left-color: #e0e0e0; }
+        
+        .pulsating-dot {
+            position: absolute; top: -3px; left: 0; width: 10px; height: 10px; 
+            background-color: #3498db; border-radius: 50%; opacity: 0;
+        }
+        
+        @keyframes flow {
+            0% { left: 0; opacity: 1; }
+            90% { opacity: 1; }
+            100% { left: 100%; opacity: 0; }
+        }
+        
+        .streaming .pulsating-dot { animation: flow 1.5s infinite linear; }
+        
+        /* Modal Styles */
+        .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { 
+            background-color: #1e1e1e; color: #d4d4d4; margin: 10% auto; padding: 0; border-radius: 8px; 
+            width: 80%; max-width: 800px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); font-family: 'Consolas', 'Monaco', monospace;
+        }
+        .modal-header { padding: 15px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+        .modal-body { padding: 20px; max-height: 400px; overflow-y: auto; }
+        .close { color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .close:hover { color: white; }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+        .log-timestamp { color: #569cd6; }
+        .log-level { color: #4ec9b0; }
+        
+        /* Component Down State - Red Cross Overlay */
+        .component-icon::before,
+        .component-icon::after {
+            content: '';
+            position: absolute;
+            display: none;
+            background-color: #f44336;
+            border-radius: 2px;
+        }
+        
+        .component-icon.down::before,
+        .component-icon.down::after {
+            display: block;
+        }
+        
+        .component-icon.down::before {
+            width: 60%;
+            height: 4px;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+        
+        .component-icon.down::after {
+            width: 4px;
+            height: 60%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+        
+        .component-icon.down {
+            border-color: #f44336 !important;
+            background-color: #ffebee !important;
+            opacity: 0.6;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-5px) rotate(-5deg); }
+            50% { transform: translateX(5px) rotate(5deg); }
+            75% { transform: translateX(-3px) rotate(-3deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Event Log Demo Pipeline</h1>
+        
+        <div class="panel">
+            <h3>Stream Controls</h3>
+            <div class="control-group">
+                <label>Log Size (kB): <input type="number" id="size_kb" value="1" min="1"></label>
+                <label>Rate (logs/sec): <input type="number" id="rate" value="1" min="1"></label>
+                <button id="startBtn" onclick="startStream()">Start Log Stream</button>
+                <button id="stopBtn" onclick="stopStream()" disabled>Stop Log Stream</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>🔥 Chaos Nurse (Demo Mode)</h3>
+            <div class="control-group">
+                <button id="chaosEnableBtn" onclick="enableChaos()" style="background-color: #ff5722; color: white; border: none;">Enable Auto Chaos</button>
+                <button id="chaosDisableBtn" onclick="disableChaos()" style="background-color: #9e9e9e; color: white; border: none;" disabled>Disable Auto Chaos</button>
+                <button onclick="triggerChaosNow()" style="background-color: #e91e63; color: white; border: none; font-weight: 600;">⚡ Trigger Now</button>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-weight: 600;">Status:</span>
+                    <span id="chaosStatus" style="padding: 5px 12px; border-radius: 4px; background-color: #9e9e9e; color: white; font-weight: 600;">Disabled</span>
+                </div>
+            </div>
+            <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                <strong>About:</strong> The Chaos Nurse intermittently disrupts services (stop/restart/pause) every 60 seconds when enabled, or trigger manually anytime.
+            </div>
+            <div style="margin-top: 15px;">
+                <strong>Recent Actions:</strong>
+                <div id="chaosHistory" style="max-height: 100px; overflow-y: auto; background: #f9f9f9; padding: 10px; border-radius: 4px; margin-top: 5px; font-family: monospace; font-size: 0.9em;">
+                    <em style="color: #999;">No chaos actions yet</em>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>⏱️ Data Retention Configuration</h3>
+            <div class="control-group">
+                <label>Cassandra TTL (days): <input type="number" id="cassandra_ttl_days" value="60" min="1" max="365"></label>
+                <label>Kafka Retention (days): <input type="number" id="kafka_retention_days" value="8" min="1" max="30"></label>
+                <button onclick="updateRetention()" style="background-color: #3498db; color: white; border: none;">Update Retention</button>
+                <span id="retentionStatus" style="margin-left: 10px; font-weight: 600;"></span>
+            </div>
+            <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                <strong>Note:</strong> Cassandra TTL controls automatic data expiration. Kafka retention is topic-level (demo acknowledgment only).
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>Pipeline Visualization (Click components for logs)</h3>
+            <div class="flow-container" id="flowContainer" style="position: relative;">
+                <!-- Row 1: Main Data Pipeline -->
+                <div style="display: flex; align-items: center; flex-wrap: nowrap;">
+                    <!-- Demo Client -->
+                    <div class="component" onclick="showLogs('producer')">
+                        <div class="component-icon">
+                            D
+                            <div class="component-counter" id="count_producer">0</div>
+                        </div>
+                        <div class="component-label">Demo Client</div>
+                    </div>
+                    <div class="arrow"><div class="pulsating-dot"></div></div>
+                    
+                    <!-- Traefik (API Gateway) -->
+                    <div class="component" onclick="showLogs('traefik')">
+                        <div class="component-icon" style="border-color: #9b59b6; color: #9b59b6;">
+                            T
+                        </div>
+                        <div class="component-label">Traefik</div>
+                    </div>
+                    <div class="arrow"><div class="pulsating-dot"></div></div>
+                    
+                    <!-- Kafka -->
+                    <div class="component" onclick="showLogs('kafka')">
+                        <div class="component-icon">
+                            K
+                            <div class="component-counter" id="count_kafka">0</div>
+                        </div>
+                        <div class="component-label">Kafka</div>
+                    </div>
+                    <div class="arrow"><div class="pulsating-dot"></div></div>
+                    
+                    <!-- Flink -->
+                    <div class="component" onclick="showLogs('flink')">
+                        <div class="component-icon" style="border-color: #e74c3c; color: #e74c3c;">
+                            F
+                        </div>
+                        <div class="component-label">Flink</div>
+                    </div>
+                    <div class="arrow"><div class="pulsating-dot"></div></div>
+                    
+                    <!-- Cassandra -->
+                    <div class="component" onclick="showLogs('cassandra')">
+                        <div class="component-icon">
+                            C
+                            <div class="component-counter" id="count_cassandra">0</div>
+                        </div>
+                        <div class="component-label">Cassandra</div>
+                    </div>
+                    <div class="arrow"><div class="pulsating-dot"></div></div>
+                    
+                    <!-- Archive (MinIO/S3) -->
+                    <div class="component" onclick="showLogs('minio')">
+                        <div class="component-icon" style="border-color: #f39c12; color: #f39c12;">
+                            A
+                            <div class="component-counter" id="count_archive">0</div>
+                        </div>
+                        <div class="component-label">Archive</div>
+                    </div>
+                </div>
+                
+                <!-- Row 2: Supporting Infrastructure -->
+                <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 30px; margin-top: 40px; justify-content: center; width: 100%;">
+                    <!-- Zookeeper (supports Kafka) -->
+                    <div class="component" onclick="showLogs('zookeeper')">
+                        <div class="component-icon" style="border-color: #16a085; color: #16a085;">
+                            Z
+                        </div>
+                        <div class="component-label">Zookeeper</div>
+                    </div>
+                    
+                    <!-- Airflow (orchestration) -->
+                    <div class="component" onclick="showLogs('airflow')">
+                        <div class="component-icon" style="border-color: #017cee; color: #017cee;">
+                            A
+                        </div>
+                        <div class="component-label">Airflow</div>
+                    </div>
+                    
+                    <!-- Presto (query engine) -->
+                    <div class="component" onclick="showLogs('presto')">
+                        <div class="component-icon" style="border-color: #5d4c8a; color: #5d4c8a;">
+                            P
+                        </div>
+                        <div class="component-label">Presto</div>
+                    </div>
+                    
+                    <!-- Grafana (monitoring/visualization) - opens in new tab -->
+                    <div class="component" onclick="openGrafana(event)">
+                        <div class="component-icon" style="border-color: #f46800; color: #f46800;">
+                            G
+                            <div class="component-external-link" title="Open Grafana UI">🔗</div>
+                        </div>
+                        <div class="component-label">Grafana</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>System Monitoring</h3>
+            <div class="metric-grid">
+                <div class="metric">
+                    <label>Status</label> <span id="status">Idle</span>
+                </div>
+                <div class="metric">
+                    <label>Logs Generated</label> <span id="ingestion_count">0</span>
+                </div>
+                <div class="metric">
+                    <label>Kafka Queue</label> <span id="kafka_size">-</span>
+                </div>
+                <div class="metric">
+                    <label>Cassandra Records</label> <span id="cassandra_count">-</span>
+                </div>
+                <div class="metric">
+                    <label>Successful Logs</label> <span id="successful_count" style="color: #4CAF50;">0</span>
+                </div>
+                <div class="metric">
+                    <label>Failed Logs</label> <span id="unsuccessful_count" style="color: #f44336;">0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log Modal -->
+    <div id="logModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle" style="margin:0; color:white; border:none;">Component Logs</h3>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <div class="modal-body" id="logContainer">
+                <!-- Logs will appear here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isStreaming = false;
+        let currentLogComponent = null;
+        let logInterval = null;
+
+        // Modal Logic
+        const modal = document.getElementById("logModal");
+        
+        window.onclick = function(event) {
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+
+        function closeModal() {
+            modal.style.display = "none";
+            currentLogComponent = null;
+            if (logInterval) clearInterval(logInterval);
+        }
+
+        function showLogs(component) {
+            currentLogComponent = component;
+            document.getElementById("modalTitle").innerText = component.charAt(0).toUpperCase() + component.slice(1) + " Logs";
+            modal.style.display = "block";
+            fetchLogs();
+            logInterval = setInterval(fetchLogs, 1000);
+        }
+        
+        function openGrafana(event) {
+            event.stopPropagation();
+            window.open('http://localhost:3000', '_blank');
+        }
+
+        function fetchLogs() {
+            if (!currentLogComponent) return;
+            fetch(`/logs/${currentLogComponent}`)
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById("logContainer");
+                    container.innerHTML = data.logs.map(log => `<div class="log-entry">${log}</div>`).join('');
+                    // Auto scroll to bottom
+                    // container.scrollTop = container.scrollHeight; 
+                });
+        }
+
+        // Stream Logic
+        function updateUI(streaming) {
+            isStreaming = streaming;
+            document.getElementById('startBtn').disabled = streaming;
+            document.getElementById('stopBtn').disabled = !streaming;
+            document.getElementById('size_kb').disabled = streaming;
+            document.getElementById('rate').disabled = streaming;
+            
+            const statusEl = document.getElementById('status');
+            statusEl.innerText = streaming ? "Streaming..." : "Idle";
+            statusEl.style.color = streaming ? "#4CAF50" : "#333";
+            
+            const flowContainer = document.getElementById('flowContainer');
+            if (streaming) {
+                flowContainer.classList.add('streaming');
+            } else {
+                flowContainer.classList.remove('streaming');
+            }
+        }
+
+        function startStream() {
+            const size_kb = document.getElementById('size_kb').value;
+            const rate = document.getElementById('rate').value;
+
+            fetch('/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ size_kb: size_kb, rate: rate })
+            })
+            .then(r => r.json())
+            .then(data => {
+                updateUI(true);
+            });
+        }
+
+        function stopStream() {
+            fetch('/stop', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                updateUI(false);
+            });
+        }
+
+        function fetchMonitor() {
+            fetch('/monitor')
+            .then(r => r.json())
+            .then(data => {
+                // Update counters
+                document.getElementById('count_producer').innerText = data.producer_count;
+                document.getElementById('count_kafka').innerText = data.kafka_count;
+                document.getElementById('count_cassandra').innerText = data.cassandra_count;
+                document.getElementById('count_archive').innerText = data.archive_count || 0;
+
+                // Update legacy panel (optional, keeping for now)
+                document.getElementById('ingestion_count').innerText = data.producer_count;
+                document.getElementById('kafka_size').innerText = data.kafka_count;
+                document.getElementById('cassandra_count').innerText = data.cassandra_count;
+                
+                // Update success/failure counters
+                document.getElementById('successful_count').innerText = data.successful_count || 0;
+                document.getElementById('unsuccessful_count').innerText = data.unsuccessful_count || 0;
+                
+                if (data.is_streaming !== isStreaming) {
+                    updateUI(data.is_streaming);
+                }
+            });
+        }
+
+        setInterval(fetchMonitor, 1000);
+        fetchMonitor();
+
+        // Chaos Nurse Logic
+        function enableChaos() {
+            fetch('/chaos/enable', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                updateChaosUI();
+            });
+        }
+
+        function disableChaos() {
+            fetch('/chaos/disable', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                updateChaosUI();
+            });
+        }
+        
+        function triggerChaosNow() {
+            fetch('/chaos/trigger', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                updateChaosUI();
+            });
+        }
+
+        function updateRetention() {
+            const cassandraTtlDays = parseInt(document.getElementById('cassandra_ttl_days').value);
+            const kafkaRetentionDays = parseInt(document.getElementById('kafka_retention_days').value);
+            
+            fetch('/config/retention', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    cassandra_ttl_days: cassandraTtlDays,
+                    kafka_retention_days: kafkaRetentionDays
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                const statusEl = document.getElementById('retentionStatus');
+                if (data.success) {
+                    statusEl.innerText = '✓ Updated successfully';
+                    statusEl.style.color = '#4CAF50';
+                } else {
+                    statusEl.innerText = '✗ ' + (data.error || 'Update failed');
+                    statusEl.style.color = '#f44336';
+                }
+                setTimeout(() => { statusEl.innerText = ''; }, 5000);
+            })
+            .catch(err => {
+                const statusEl = document.getElementById('retentionStatus');
+                statusEl.innerText = '✗ Request failed';
+                statusEl.style.color = '#f44336';
+                setTimeout(() => { statusEl.innerText = ''; }, 5000);
+            });
+        }
+
+        function updateChaosUI() {
+            fetch('/chaos/status')
+            .then(r => r.json())
+            .then(data => {
+                const isEnabled = data.enabled;
+                document.getElementById('chaosEnableBtn').disabled = isEnabled;
+                document.getElementById('chaosDisableBtn').disabled = !isEnabled;
+                
+                const statusEl = document.getElementById('chaosStatus');
+                statusEl.innerText = isEnabled ? 'Enabled' : 'Disabled';
+                statusEl.style.backgroundColor = isEnabled ? '#ff5722' : '#9e9e9e';
+            });
+
+            // Update history and animate nurses
+            fetch('/chaos/history')
+            .then(r => r.json())
+            .then(data => {
+                const historyEl = document.getElementById('chaosHistory');
+                if (data.history.length === 0) {
+                    historyEl.innerHTML = '<em style="color: #999;">No chaos actions yet</em>';
+                } else {
+                    historyEl.innerHTML = data.history.map(entry => 
+                        `<div style="margin-bottom: 5px;">[${entry.timestamp}] ${entry.action.toUpperCase()} ${entry.service}</div>`
+                    ).join('');
+                    historyEl.scrollTop = historyEl.scrollHeight;
+                    
+                    // Mark affected components as down
+                    const isEnabled = data.enabled;
+                    if (isEnabled && data.history.length > 0) {
+                        updateComponentStates(data.history);
+                    }
+                }
+            });
+        }
+
+        // Track component down states by querying actual container status
+        function updateComponentStates(history) {
+            // Map service names to component elements
+            const serviceMap = {
+                'kafka': document.querySelector('.component:nth-child(7)'),
+                'flink': document.querySelector('.component:nth-child(9)'),
+                'cassandra': document.querySelector('.component:nth-child(11)')
+            };
+            
+            // Query actual status for each service that might be affected
+            Object.keys(serviceMap).forEach(service => {
+                fetch(`/control/${service}/status`)
+                    .then(r => r.json())
+                    .then(data => {
+                        const targetComponent = serviceMap[service];
+                        if (targetComponent) {
+                            const icon = targetComponent.querySelector('.component-icon');
+                            if (icon) {
+                                // Mark as down if status is exited, stopped, dead, or not found
+                                const downStates = ['exited', 'stopped', 'dead', 'not_found', 'restarting'];
+                                if (downStates.includes(data.state?.toLowerCase())) {
+                                    icon.classList.add('down');
+                                } else {
+                                    icon.classList.remove('down');
+                                }
+                            }
+                        }
+                    })
+                    .catch(err => {
+                        // On error, remove down state (assume running)
+                        const targetComponent = serviceMap[service];
+                        if (targetComponent) {
+                            const icon = targetComponent.querySelector('.component-icon');
+                            if (icon) icon.classList.remove('down');
+                        }
+                    });
+            });
+        }
+
+        // Load retention settings on page load
+        function loadRetentionSettings() {
+            fetch('/config/retention')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('cassandra_ttl_days').value = data.cassandra_ttl_days;
+                document.getElementById('kafka_retention_days').value = data.kafka_retention_days;
+            })
+            .catch(err => console.log('Failed to load retention settings:', err));
+        }
+
+        // Poll chaos status and component states every 5 seconds
+        setInterval(() => {
+            updateChaosUI();
+            updateComponentStates([]);  // Check actual container status
+        }, 5000);
+        updateChaosUI();
+        loadRetentionSettings();
+    </script>
+</body>
+</html>
