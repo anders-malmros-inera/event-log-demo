@@ -123,9 +123,15 @@ class LogProducer:
                 self.kafka_producer = KafkaProducer(
                     bootstrap_servers=['kafka:9092'],
                     value_serializer=lambda x: json.dumps(x).encode('utf-8'),
-                    request_timeout_ms=10000,
-                    max_block_ms=5000,
-                    retries=3
+                    request_timeout_ms=30000,  # Increased from 10s to 30s
+                    max_block_ms=10000,  # Increased from 5s to 10s
+                    retries=3,
+                    # High-throughput batching settings
+                    acks=1,  # Wait for leader acknowledgment only (faster than acks='all')
+                    compression_type='lz4',  # Enable compression for better throughput
+                    batch_size=32768,  # 32KB batches (increased from default 16KB)
+                    linger_ms=10,  # Wait 10ms to batch messages together
+                    buffer_memory=67108864  # 64MB buffer (increased from default 32MB)
                 )
                 print("Kafka connection established successfully", flush=True)
                 return
@@ -225,9 +231,10 @@ class LogProducer:
                     continue
             
             try:
-                future = self.kafka_producer.send('event-logs', value=log)
-                # Wait for send to complete with timeout
-                future.get(timeout=2)
+                # Send async without waiting - let Kafka batch efficiently
+                # Producer counts messages sent to internal buffer as "produced"
+                # Kafka will handle batching (linger_ms=10) and compression (lz4)
+                self.kafka_producer.send('event-logs', value=log)
                 return True
             except Exception as e:
                 print(f"Kafka send attempt {attempt} failed: {e}", flush=True)
@@ -378,8 +385,17 @@ def stop_stream():
 
 @app.route('/monitor')
 def monitor():
-    """Serve cached metrics instantly without blocking."""
-    return jsonify(metrics_cache)
+    """Serve metrics with real-time producer counts."""
+    # Create a copy of cached metrics
+    response = dict(metrics_cache)
+    
+    # Override with real-time producer counts for accurate UI display during load testing
+    response["producer_count"] = producer.generated_count
+    response["successful_count"] = producer.successful_count
+    response["unsuccessful_count"] = producer.unsuccessful_count
+    response["is_streaming"] = stream_active or load_test_active
+    
+    return jsonify(response)
 
 @app.route('/control/<service>/<action>', methods=['POST'])
 def control_service(service, action):
@@ -568,6 +584,299 @@ def configure_retention():
         except Exception as e:
             print(f"Failed to update retention policies: {e}", flush=True)
             return jsonify({"error": str(e)}), 500
+
+# Load testing state
+load_test_active = False
+load_test_thread = None
+load_test_metrics = {
+    "start_time": None,
+    "elapsed_seconds": 0,
+    "current_rate": 0,
+    "total_sent": 0,
+    "total_failed": 0,
+    "bottlenecks": [],
+    "baseline": {}  # Baseline metrics when test starts
+}
+
+def detect_bottleneck():
+    """Detect bottlenecks by analyzing component metrics deltas during load test."""
+    bottlenecks = []
+    
+    if not load_test_active or not load_test_metrics.get('baseline'):
+        return bottlenecks
+    
+    try:
+        # Get current metrics
+        kafka_count = metrics_cache.get('kafka_count', 0)
+        cassandra_count = metrics_cache.get('cassandra_count', 0)
+        archive_count = metrics_cache.get('archive_count', 0)
+        producer_count = producer.generated_count
+        
+        # Get baseline (starting point of load test)
+        baseline = load_test_metrics['baseline']
+        baseline_kafka = baseline.get('kafka_count', 0)
+        baseline_cassandra = baseline.get('cassandra_count', 0)
+        baseline_archive = baseline.get('archive_count', 0)
+        baseline_producer = baseline.get('producer_count', 0)
+        
+        # Calculate deltas since test started
+        kafka_delta = kafka_count - baseline_kafka
+        cassandra_delta = cassandra_count - baseline_cassandra
+        archive_delta = archive_count - baseline_archive
+        producer_delta = producer_count - baseline_producer
+        
+        # Get current rate for time-based lag calculation
+        current_rate = load_test_metrics.get('current_rate', 1)
+        if current_rate <= 0:
+            current_rate = 1  # Prevent division by zero
+        
+        # Bottleneck detection based on deltas
+        # Producer→Kafka: If Kafka ingestion is significantly behind
+        # Note: With async batching, expect 30-60s lag during high-rate tests (buffering, not bottleneck)
+        producer_kafka_lag = producer_delta - kafka_delta
+        lag_seconds = producer_kafka_lag / current_rate if producer_kafka_lag > 0 else 0
+        
+        # Only alert if lag > 60s (growing faster than async batching can handle)
+        if lag_seconds > 60:
+            bottlenecks.append({
+                "component": "Producer→Kafka",
+                "issue": f"Kafka ingestion lag ({producer_kafka_lag} messages behind producer, ~{lag_seconds:.1f}s at current rate)",
+                "severity": "high" if producer_kafka_lag > 500 else "medium"
+            })
+        
+        # Flink→Cassandra: If Cassandra hasn't written messages Kafka received
+        kafka_cassandra_lag = kafka_delta - cassandra_delta
+        if kafka_cassandra_lag > 200:
+            lag_seconds = kafka_cassandra_lag / current_rate
+            bottlenecks.append({
+                "component": "Flink→Cassandra",
+                "issue": f"Cassandra write lag ({kafka_cassandra_lag} messages behind Kafka, ~{lag_seconds:.1f}s at current rate)",
+                "severity": "high" if kafka_cassandra_lag > 1000 else "medium"
+            })
+        
+        # Cassandra→Archive: If Archive hasn't written messages Cassandra received
+        cassandra_archive_lag = cassandra_delta - archive_delta
+        if cassandra_archive_lag > 200:
+            lag_seconds = cassandra_archive_lag / current_rate
+            bottlenecks.append({
+                "component": "Cassandra→Archive",
+                "issue": f"Archive write lag ({cassandra_archive_lag} messages behind Cassandra, ~{lag_seconds:.1f}s at current rate)",
+                "severity": "high" if cassandra_archive_lag > 1000 else "medium"
+            })
+        
+        # Check failure rate during test
+        test_failed = load_test_metrics.get('total_failed', 0)
+        test_sent = load_test_metrics.get('total_sent', 0)
+        if test_sent > 0 and test_failed > test_sent * 0.1:  # >10% failure rate
+            bottlenecks.append({
+                "component": "Producer",
+                "issue": f"High failure rate during test ({test_failed}/{test_sent + test_failed} = {int(test_failed/(test_sent + test_failed)*100)}%)",
+                "severity": "critical"
+            })
+    
+    except Exception as e:
+        print(f"Error detecting bottlenecks: {e}", flush=True)
+    
+    return bottlenecks
+
+def run_load_test(config):
+    """Execute load test with ramping."""
+    global load_test_active, load_test_metrics
+    
+    start_rate = config.get('start_rate', 1)
+    max_rate = config.get('max_rate', 100)
+    ramp_duration = config.get('ramp_duration_seconds', 60)
+    sustain_duration = config.get('sustain_duration_seconds', 60)
+    size_kb = config.get('size_kb', 1)
+    
+    # Wait briefly for fresh metrics before capturing baseline
+    print("[Load Test] Refreshing metrics for baseline...", flush=True)
+    producer.refresh_metrics_cache()
+    time.sleep(1)  # Give metrics time to populate
+    
+    # Capture baseline metrics at test start
+    baseline = {
+        'kafka_count': metrics_cache.get('kafka_count', 0),
+        'cassandra_count': metrics_cache.get('cassandra_count', 0),
+        'producer_count': producer.generated_count,
+        'archive_count': metrics_cache.get('archive_count', 0),
+        'test_start_producer': producer.generated_count  # Store separate baseline for test calculations
+    }
+    
+    load_test_metrics = {
+        "start_time": time.time(),
+        "elapsed_seconds": 0,
+        "current_rate": start_rate,
+        "total_sent": 0,
+        "total_failed": 0,
+        "bottlenecks": [],
+        "phase": "ramping",
+        "baseline": baseline
+    }
+    
+    print(f"[Load Test] Starting: {start_rate}→{max_rate} msgs/sec over {ramp_duration}s, sustain for {sustain_duration}s", flush=True)
+    
+    start_time = time.time()
+    phase_end_time = start_time + ramp_duration
+    
+    while load_test_active:
+        current_time = time.time()
+        elapsed = current_time - start_time
+        load_test_metrics["elapsed_seconds"] = int(elapsed)
+        
+        # Determine current phase and rate
+        if elapsed < ramp_duration:
+            # Ramping phase: linear increase
+            progress = elapsed / ramp_duration
+            current_rate = start_rate + (max_rate - start_rate) * progress
+            load_test_metrics["phase"] = "ramping"
+        elif elapsed < ramp_duration + sustain_duration:
+            # Sustain phase: maintain max rate
+            current_rate = max_rate
+            load_test_metrics["phase"] = "sustaining"
+        else:
+            # Test complete
+            load_test_metrics["phase"] = "completed"
+            print(f"[Load Test] Completed after {int(elapsed)}s", flush=True)
+            break
+        
+        load_test_metrics["current_rate"] = round(current_rate, 1)
+        
+        # Send burst of messages
+        messages_this_second = int(current_rate)
+        delay = 1.0 / current_rate if current_rate > 0 else 1.0
+        
+        for _ in range(messages_this_second):
+            if not load_test_active:
+                break
+            
+            try:
+                log = producer.generate_log(size_kb)
+                success = producer.send_log(log)
+                
+                if success:
+                    load_test_metrics["total_sent"] += 1
+                else:
+                    load_test_metrics["total_failed"] += 1
+                
+                time.sleep(delay)
+            except Exception as e:
+                print(f"[Load Test] Send error: {e}", flush=True)
+                load_test_metrics["total_failed"] += 1
+        
+        # Detect bottlenecks every 10 seconds
+        if int(elapsed) % 10 == 0:
+            bottlenecks = detect_bottleneck()
+            if bottlenecks:
+                load_test_metrics["bottlenecks"] = bottlenecks
+                for b in bottlenecks:
+                    print(f"[Load Test] Bottleneck detected: {b['component']} - {b['issue']} ({b['severity']})", flush=True)
+    
+    # Final flush at end of test - ensure all buffered messages sent
+    if producer.kafka_producer:
+        try:
+            print("[Load Test] Flushing remaining messages...", flush=True)
+            producer.kafka_producer.flush(timeout=10)
+            time.sleep(2)  # Give Kafka time to process final batch
+        except Exception as flush_error:
+            print(f"[Load Test] Final flush warning: {flush_error}", flush=True)
+    
+    load_test_active = False
+    print(f"[Load Test] Final: {load_test_metrics['total_sent']} sent, {load_test_metrics['total_failed']} failed", flush=True)
+
+@app.route('/loadtest/start', methods=['POST'])
+def start_load_test():
+    """Start ramping load test."""
+    global load_test_active, load_test_thread
+    
+    if load_test_active:
+        return jsonify({"error": "Load test already running"}), 400
+    
+    data = request.get_json() or {}
+    
+    config = {
+        'start_rate': int(data.get('start_rate', 1)),
+        'max_rate': int(data.get('max_rate', 50)),
+        'ramp_duration_seconds': int(data.get('ramp_duration_seconds', 60)),
+        'sustain_duration_seconds': int(data.get('sustain_duration_seconds', 60)),
+        'size_kb': float(data.get('size_kb', 1))
+    }
+    
+    load_test_active = True
+    load_test_thread = threading.Thread(target=run_load_test, args=(config,), daemon=True)
+    load_test_thread.start()
+    
+    return jsonify({
+        "status": "Load test started",
+        "config": config
+    })
+
+@app.route('/loadtest/stop', methods=['POST'])
+def stop_load_test():
+    """Stop active load test."""
+    global load_test_active
+    
+    if not load_test_active:
+        return jsonify({"status": "No active load test"}), 400
+    
+    load_test_active = False
+    return jsonify({"status": "Load test stopping"})
+
+@app.route('/loadtest/status', methods=['GET'])
+def get_load_test_status():
+    """Get load test metrics and bottleneck analysis."""
+    
+    # Calculate detailed bottleneck metrics for display
+    bottleneck_debug = {}
+    if load_test_active and load_test_metrics.get('baseline'):
+        kafka_count = metrics_cache.get('kafka_count', 0)
+        cassandra_count = metrics_cache.get('cassandra_count', 0)
+        archive_count = metrics_cache.get('archive_count', 0)
+        producer_count = producer.generated_count
+        
+        baseline = load_test_metrics['baseline']
+        
+        # Use total_sent from load test metrics for accurate producer delta
+        producer_delta = load_test_metrics.get('total_sent', 0)
+        
+        bottleneck_debug = {
+            "current_counts": {
+                "producer": producer_count,
+                "kafka": kafka_count,
+                "cassandra": cassandra_count,
+                "archive": archive_count
+            },
+            "baseline_counts": {
+                "producer": baseline.get('test_start_producer', 0),
+                "kafka": baseline.get('kafka_count', 0),
+                "cassandra": baseline.get('cassandra_count', 0),
+                "archive": baseline.get('archive_count', 0)
+            },
+            "deltas": {
+                "producer": producer_delta,  # Use actual messages sent during test
+                "kafka": kafka_count - baseline.get('kafka_count', 0),
+                "cassandra": cassandra_count - baseline.get('cassandra_count', 0),
+                "archive": archive_count - baseline.get('archive_count', 0)
+            },
+            "lags": {
+                "producer_kafka": producer_delta - (kafka_count - baseline.get('kafka_count', 0)),
+                "kafka_cassandra": (kafka_count - baseline.get('kafka_count', 0)) - (cassandra_count - baseline.get('cassandra_count', 0)),
+                "cassandra_archive": (cassandra_count - baseline.get('cassandra_count', 0)) - (archive_count - baseline.get('archive_count', 0))
+            },
+            "current_rate": load_test_metrics.get('current_rate', 0)
+        }
+    
+    return jsonify({
+        "active": load_test_active,
+        "metrics": load_test_metrics,
+        "system_metrics": {
+            "producer_count": metrics_cache.get('producer_count', 0),
+            "kafka_count": metrics_cache.get('kafka_count', 0),
+            "cassandra_count": metrics_cache.get('cassandra_count', 0),
+            "archive_count": metrics_cache.get('archive_count', 0)
+        },
+        "bottleneck_debug": bottleneck_debug
+    })
 
 if __name__ == '__main__':
     print("Starting producer application...", flush=True)

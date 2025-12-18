@@ -144,6 +144,45 @@
         </div>
 
         <div class="panel">
+            <h3>📊 Load Testing & Bottleneck Analysis</h3>
+            <div class="control-group">
+                <label>Start Rate (msg/s): <input type="number" id="load_start_rate" value="1" min="1"></label>
+                <label>Max Rate (msg/s): <input type="number" id="load_max_rate" value="50" min="1"></label>
+                <label>Ramp Duration (s): <input type="number" id="load_ramp_duration" value="60" min="10"></label>
+                <label>Sustain Duration (s): <input type="number" id="load_sustain_duration" value="60" min="10"></label>
+            </div>
+            <div class="control-group">
+                <label>Log Size (kB): <input type="number" id="load_size_kb" value="1" min="1"></label>
+                <button id="loadTestStartBtn" onclick="startLoadTest()" style="background-color: #2196F3; color: white; border: none;">🚀 Start Load Test</button>
+                <button id="loadTestStopBtn" onclick="stopLoadTest()" style="background-color: #f44336; color: white; border: none;" disabled>⏹ Stop Load Test</button>
+            </div>
+            <div style="margin-top: 15px;">
+                <strong>Status:</strong>
+                <div id="loadTestStatus" style="background: #f9f9f9; padding: 15px; border-radius: 4px; margin-top: 5px;">
+                    <div><span style="font-weight: 600;">Phase:</span> <span id="loadPhase">Idle</span></div>
+                    <div><span style="font-weight: 600;">Current Rate:</span> <span id="loadCurrentRate">0</span> msgs/sec</div>
+                    <div><span style="font-weight: 600;">Elapsed:</span> <span id="loadElapsed">0</span>s</div>
+                    <div><span style="font-weight: 600;">Sent:</span> <span id="loadSent">0</span> | <span style="font-weight: 600;">Failed:</span> <span id="loadFailed" style="color: #f44336;">0</span></div>
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <strong>🔍 Detected Bottlenecks:</strong>
+                <div id="bottleneckList" style="background: #fff3cd; padding: 10px; border-radius: 4px; margin-top: 5px; min-height: 40px; border-left: 4px solid #ff9800;">
+                    <em style="color: #666;">No bottlenecks detected</em>
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <strong>📊 Bottleneck Detection Metrics:</strong>
+                <div id="bottleneckMetrics" style="background: #e3f2fd; padding: 10px; border-radius: 4px; margin-top: 5px; font-family: monospace; font-size: 0.85em; border-left: 4px solid #2196F3;">
+                    <em style="color: #666;">Metrics will appear during load test</em>
+                </div>
+            </div>
+            <div style="margin-top: 10px; font-size: 0.9em; color: #666;">
+                <strong>About:</strong> Ramps load from start rate to max rate over the specified duration, then sustains max rate. Automatically detects bottlenecks in the pipeline.
+            </div>
+        </div>
+
+        <div class="panel">
             <h3>🔥 Chaos Nurse (Demo Mode)</h3>
             <div class="control-group">
                 <button id="chaosEnableBtn" onclick="enableChaos()" style="background-color: #ff5722; color: white; border: none;">Enable Auto Chaos</button>
@@ -573,6 +612,134 @@
                 document.getElementById('kafka_retention_days').value = data.kafka_retention_days;
             })
             .catch(err => console.log('Failed to load retention settings:', err));
+        }
+
+        // Load Testing Functions
+        function startLoadTest() {
+            const config = {
+                start_rate: parseInt(document.getElementById('load_start_rate').value),
+                max_rate: parseInt(document.getElementById('load_max_rate').value),
+                ramp_duration_seconds: parseInt(document.getElementById('load_ramp_duration').value),
+                sustain_duration_seconds: parseInt(document.getElementById('load_sustain_duration').value),
+                size_kb: parseFloat(document.getElementById('load_size_kb').value)
+            };
+
+            fetch('/loadtest/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            })
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('loadTestStartBtn').disabled = true;
+                document.getElementById('loadTestStopBtn').disabled = false;
+                updateLoadTestUI();
+            })
+            .catch(err => {
+                console.error('Failed to start load test:', err);
+            });
+        }
+
+        function stopLoadTest() {
+            fetch('/loadtest/stop', { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('loadTestStartBtn').disabled = false;
+                document.getElementById('loadTestStopBtn').disabled = true;
+            })
+            .catch(err => {
+                console.error('Failed to stop load test:', err);
+            });
+        }
+
+        function updateLoadTestUI() {
+            fetch('/loadtest/status')
+            .then(r => r.json())
+            .then(data => {
+                const metrics = data.metrics || {};
+                
+                // Update status fields
+                document.getElementById('loadPhase').innerText = metrics.phase || 'Idle';
+                document.getElementById('loadCurrentRate').innerText = metrics.current_rate || 0;
+                document.getElementById('loadElapsed').innerText = metrics.elapsed_seconds || 0;
+                document.getElementById('loadSent').innerText = metrics.total_sent || 0;
+                document.getElementById('loadFailed').innerText = metrics.total_failed || 0;
+                
+                // Update phase styling
+                const phaseEl = document.getElementById('loadPhase');
+                if (metrics.phase === 'ramping') {
+                    phaseEl.style.color = '#2196F3';
+                    phaseEl.innerText = '🔼 Ramping';
+                } else if (metrics.phase === 'sustaining') {
+                    phaseEl.style.color = '#ff9800';
+                    phaseEl.innerText = '⚡ Sustaining';
+                } else if (metrics.phase === 'completed') {
+                    phaseEl.style.color = '#4CAF50';
+                    phaseEl.innerText = '✅ Completed';
+                    document.getElementById('loadTestStartBtn').disabled = false;
+                    document.getElementById('loadTestStopBtn').disabled = true;
+                } else {
+                    phaseEl.style.color = '#666';
+                    phaseEl.innerText = 'Idle';
+                }
+                
+                // Update bottlenecks
+                const bottlenecks = metrics.bottlenecks || [];
+                const bottleneckList = document.getElementById('bottleneckList');
+                if (bottlenecks.length === 0) {
+                    bottleneckList.innerHTML = '<em style="color: #666;">No bottlenecks detected</em>';
+                    bottleneckList.style.backgroundColor = '#d4edda';
+                    bottleneckList.style.borderLeftColor = '#28a745';
+                } else {
+                    bottleneckList.style.backgroundColor = '#fff3cd';
+                    bottleneckList.style.borderLeftColor = '#ff9800';
+                    bottleneckList.innerHTML = bottlenecks.map(b => {
+                        const severityColors = {
+                            'critical': '#d32f2f',
+                            'high': '#f44336',
+                            'medium': '#ff9800',
+                            'low': '#ffc107'
+                        };
+                        const color = severityColors[b.severity] || '#666';
+                        return `<div style="margin-bottom: 8px;">
+                            <span style="background: ${color}; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; font-weight: bold;">${b.severity.toUpperCase()}</span>
+                            <strong>${b.component}:</strong> ${b.issue}
+                        </div>`;
+                    }).join('');
+                }
+                
+                // Update bottleneck debug metrics
+                const debug = data.bottleneck_debug || {};
+                const metricsEl = document.getElementById('bottleneckMetrics');
+                if (Object.keys(debug).length > 0) {
+                    const currentRate = debug.current_rate || 0;
+                    const lags = debug.lags || {};
+                    const deltas = debug.deltas || {};
+                    const baseline = debug.baseline_counts || {};
+                    const current = debug.current_counts || {};
+                    
+                    metricsEl.innerHTML = `
+                        <div style="margin-bottom: 8px;"><strong>Current Rate:</strong> ${currentRate.toFixed(1)} msg/s</div>
+                        <div style="margin-bottom: 8px;"><strong>Baseline (Test Start):</strong> Producer=${baseline.producer || 0}, Kafka=${baseline.kafka || 0}, Cassandra=${baseline.cassandra || 0}, Archive=${baseline.archive || 0}</div>
+                        <div style="margin-bottom: 8px;"><strong>Current Totals:</strong> Producer=${current.producer || 0}, Kafka=${current.kafka || 0}, Cassandra=${current.cassandra || 0}, Archive=${current.archive || 0}</div>
+                        <div style="margin-bottom: 8px;"><strong>Deltas (Since Test Start):</strong> Producer=${deltas.producer || 0}, Kafka=${deltas.kafka || 0}, Cassandra=${deltas.cassandra || 0}, Archive=${deltas.archive || 0}</div>
+                        <div style="margin-bottom: 8px;"><strong>Lags:</strong> Producer→Kafka=${lags.producer_kafka || 0} msgs (${currentRate > 0 ? ((lags.producer_kafka || 0) / currentRate).toFixed(1) : 0}s), Kafka→Cassandra=${lags.kafka_cassandra || 0} msgs (${currentRate > 0 ? ((lags.kafka_cassandra || 0) / currentRate).toFixed(1) : 0}s), Cassandra→Archive=${lags.cassandra_archive || 0} msgs (${currentRate > 0 ? ((lags.cassandra_archive || 0) / currentRate).toFixed(1) : 0}s)</div>
+                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #90caf9; color: #555; font-size: 0.9em;"><strong>Threshold:</strong> Bottleneck alerts trigger when lag > 60 seconds</div>
+                    `;
+                    metricsEl.style.backgroundColor = '#e3f2fd';
+                } else {
+                    metricsEl.innerHTML = '<em style="color: #666;">Metrics will appear during load test</em>';
+                    metricsEl.style.backgroundColor = '#f5f5f5';
+                }
+                
+                // Continue polling if active
+                if (data.active) {
+                    setTimeout(updateLoadTestUI, 1000);
+                }
+            })
+            .catch(err => {
+                console.error('Failed to fetch load test status:', err);
+            });
         }
 
         // Poll chaos status and component states every 5 seconds
