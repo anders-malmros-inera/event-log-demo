@@ -27,6 +27,14 @@ from container_controller import (
 )
 from chaos_nurse import get_chaos_nurse
 
+# Clean Code: Import refactored modules (OWASP A03, A05 compliant)
+from src.config import AppConfig
+from src.value_objects import LoadTestConfig
+from src.bottleneck_detector import (
+    BottleneckDetector,
+    ComponentMetrics
+)
+
 app = Flask(__name__)
 
 # Global control for streaming
@@ -47,16 +55,20 @@ minio_client = None
 archive_count_cache = {"count": 0, "last_update": 0}
 
 def init_minio():
-    """Initialize MinIO client with defensive retry."""
+    """Initialize MinIO client with defensive retry (OWASP A05: no hardcoded credentials)."""
     global minio_client
     try:
+        config = AppConfig.from_environment()
         minio_client = Minio(
-            "minio:9000",
-            access_key="minioadmin",
-            secret_key="minioadmin",
-            secure=False
+            config.minio.endpoint,
+            access_key=config.minio.access_key,
+            secret_key=config.minio.secret_key,
+            secure=config.minio.secure
         )
-        print("MinIO client initialized", flush=True)
+        print("MinIO client initialized from environment config", flush=True)
+    except ValueError as ve:
+        print(f"MinIO configuration validation failed: {ve}", flush=True)
+        minio_client = None
     except Exception as e:
         print(f"Failed to initialize MinIO client: {e}", flush=True)
         minio_client = None
@@ -115,13 +127,14 @@ class LogProducer:
         self._init_cassandra()
     
     def _init_kafka_with_retry(self, max_retries=3):
-        """Initialize Kafka producer with exponential backoff retry."""
+        """Initialize Kafka producer with exponential backoff retry (OWASP A05: config from environment)."""
         retry_delay = 1
         for attempt in range(1, max_retries + 1):
             try:
                 print(f"Attempting Kafka connection (attempt {attempt}/{max_retries})...", flush=True)
+                config = AppConfig.from_environment()
                 self.kafka_producer = KafkaProducer(
-                    bootstrap_servers=['kafka:9092'],
+                    bootstrap_servers=[config.kafka.bootstrap_servers],
                     value_serializer=lambda x: json.dumps(x).encode('utf-8'),
                     request_timeout_ms=30000,  # Increased from 10s to 30s
                     max_block_ms=10000,  # Increased from 5s to 10s
@@ -135,6 +148,10 @@ class LogProducer:
                 )
                 print("Kafka connection established successfully", flush=True)
                 return
+            except ValueError as ve:
+                print(f"Kafka configuration validation failed: {ve}", flush=True)
+                self.kafka_producer = None
+                return
             except Exception as e:
                 print(f"Kafka connection attempt {attempt} failed: {e}", flush=True)
                 if attempt < max_retries:
@@ -146,13 +163,14 @@ class LogProducer:
                     self.kafka_producer = None
 
     def _init_cassandra(self, max_retries=3):
-        """Initialize or reinitialize Cassandra connection with retry strategy."""
+        """Initialize or reinitialize Cassandra connection with retry strategy (OWASP A05: config from environment)."""
         retry_delay = 1
         for attempt in range(1, max_retries + 1):
             try:
                 print(f"Attempting Cassandra connection (attempt {attempt}/{max_retries})...", flush=True)
+                config = AppConfig.from_environment()
                 cluster = Cluster(
-                    ['cassandra'],
+                    [config.cassandra.host],
                     connect_timeout=10,
                     control_connection_timeout=10
                 )
@@ -160,12 +178,16 @@ class LogProducer:
                 
                 # Ensure keyspace and table exist
                 self.cassandra_session.execute(
-                    "CREATE KEYSPACE IF NOT EXISTS logs WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}"
+                    f"CREATE KEYSPACE IF NOT EXISTS {config.cassandra.keyspace} WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}"
                 )
                 self.cassandra_session.execute(
-                    "CREATE TABLE IF NOT EXISTS logs.events (uid text PRIMARY KEY, timestamp double, payload text)"
+                    f"CREATE TABLE IF NOT EXISTS {config.cassandra.keyspace}.{config.cassandra.table} (uid text PRIMARY KEY, timestamp double, payload text)"
                 )
                 print("Cassandra connection established successfully", flush=True)
+                return
+            except ValueError as ve:
+                print(f"Cassandra configuration validation failed: {ve}", flush=True)
+                self.cassandra_session = None
                 return
             except Exception as e:
                 print(f"Cassandra connection attempt {attempt} failed: {e}", flush=True)
@@ -598,86 +620,56 @@ load_test_metrics = {
     "baseline": {}  # Baseline metrics when test starts
 }
 
+# Bottleneck detector with configurable threshold (cyclomatic complexity < 3)
+LAG_THRESHOLD_SECONDS = 60.0
+bottleneck_detector = BottleneckDetector(lag_threshold_seconds=LAG_THRESHOLD_SECONDS)
+
 def detect_bottleneck():
-    """Detect bottlenecks by analyzing component metrics deltas during load test."""
-    bottlenecks = []
-    
+    """Detect bottlenecks using refactored low-complexity detector (SonarQube compliant)."""
     if not load_test_active or not load_test_metrics.get('baseline'):
-        return bottlenecks
+        return []
     
     try:
-        # Get current metrics
-        kafka_count = metrics_cache.get('kafka_count', 0)
-        cassandra_count = metrics_cache.get('cassandra_count', 0)
-        archive_count = metrics_cache.get('archive_count', 0)
-        producer_count = producer.generated_count
-        
-        # Get baseline (starting point of load test)
+        # Build baseline metrics
         baseline = load_test_metrics['baseline']
-        baseline_kafka = baseline.get('kafka_count', 0)
-        baseline_cassandra = baseline.get('cassandra_count', 0)
-        baseline_archive = baseline.get('archive_count', 0)
-        baseline_producer = baseline.get('producer_count', 0)
+        baseline_metrics = ComponentMetrics(
+            producer_count=baseline.get('test_start_producer', 0),
+            kafka_count=baseline.get('kafka_count', 0),
+            cassandra_count=baseline.get('cassandra_count', 0),
+            archive_count=baseline.get('archive_count', 0)
+        )
         
-        # Calculate deltas since test started
-        kafka_delta = kafka_count - baseline_kafka
-        cassandra_delta = cassandra_count - baseline_cassandra
-        archive_delta = archive_count - baseline_archive
-        producer_delta = producer_count - baseline_producer
+        # Build current metrics
+        current_metrics = ComponentMetrics(
+            producer_count=producer.generated_count,
+            kafka_count=metrics_cache.get('kafka_count', 0),
+            cassandra_count=metrics_cache.get('cassandra_count', 0),
+            archive_count=metrics_cache.get('archive_count', 0)
+        )
         
-        # Get current rate for time-based lag calculation
-        current_rate = load_test_metrics.get('current_rate', 1)
-        if current_rate <= 0:
-            current_rate = 1  # Prevent division by zero
+        # Detect bottlenecks using clean, testable detector
+        total_sent = load_test_metrics.get('total_sent', 0)
+        total_failed = load_test_metrics.get('total_failed', 0)
+        current_rate = load_test_metrics.get('current_rate', 1.0)
         
-        # Bottleneck detection based on deltas
-        # Producer→Kafka: If Kafka ingestion is significantly behind
-        # Note: With async batching, expect 30-60s lag during high-rate tests (buffering, not bottleneck)
-        producer_kafka_lag = producer_delta - kafka_delta
-        lag_seconds = producer_kafka_lag / current_rate if producer_kafka_lag > 0 else 0
+        bottlenecks = bottleneck_detector.detect_all_bottlenecks(
+            baseline=baseline_metrics,
+            current=current_metrics,
+            total_sent=total_sent,
+            total_failed=total_failed,
+            current_rate=current_rate
+        )
         
-        # Only alert if lag > 60s (growing faster than async batching can handle)
-        if lag_seconds > 60:
-            bottlenecks.append({
-                "component": "Producer→Kafka",
-                "issue": f"Kafka ingestion lag ({producer_kafka_lag} messages behind producer, ~{lag_seconds:.1f}s at current rate)",
-                "severity": "high" if producer_kafka_lag > 500 else "medium"
-            })
-        
-        # Flink→Cassandra: If Cassandra hasn't written messages Kafka received
-        kafka_cassandra_lag = kafka_delta - cassandra_delta
-        if kafka_cassandra_lag > 200:
-            lag_seconds = kafka_cassandra_lag / current_rate
-            bottlenecks.append({
-                "component": "Flink→Cassandra",
-                "issue": f"Cassandra write lag ({kafka_cassandra_lag} messages behind Kafka, ~{lag_seconds:.1f}s at current rate)",
-                "severity": "high" if kafka_cassandra_lag > 1000 else "medium"
-            })
-        
-        # Cassandra→Archive: If Archive hasn't written messages Cassandra received
-        cassandra_archive_lag = cassandra_delta - archive_delta
-        if cassandra_archive_lag > 200:
-            lag_seconds = cassandra_archive_lag / current_rate
-            bottlenecks.append({
-                "component": "Cassandra→Archive",
-                "issue": f"Archive write lag ({cassandra_archive_lag} messages behind Cassandra, ~{lag_seconds:.1f}s at current rate)",
-                "severity": "high" if cassandra_archive_lag > 1000 else "medium"
-            })
-        
-        # Check failure rate during test
-        test_failed = load_test_metrics.get('total_failed', 0)
-        test_sent = load_test_metrics.get('total_sent', 0)
-        if test_sent > 0 and test_failed > test_sent * 0.1:  # >10% failure rate
-            bottlenecks.append({
-                "component": "Producer",
-                "issue": f"High failure rate during test ({test_failed}/{test_sent + test_failed} = {int(test_failed/(test_sent + test_failed)*100)}%)",
-                "severity": "critical"
-            })
+        # Convert to dict format for JSON serialization
+        return [{
+            "component": b.component,
+            "issue": b.issue,
+            "severity": b.severity
+        } for b in bottlenecks]
     
     except Exception as e:
         print(f"Error detecting bottlenecks: {e}", flush=True)
-    
-    return bottlenecks
+        return []
 
 def run_load_test(config):
     """Execute load test with ramping."""
@@ -786,7 +778,7 @@ def run_load_test(config):
 
 @app.route('/loadtest/start', methods=['POST'])
 def start_load_test():
-    """Start ramping load test."""
+    """Start ramping load test with validated inputs (OWASP A03: injection prevention)."""
     global load_test_active, load_test_thread
     
     if load_test_active:
@@ -794,22 +786,30 @@ def start_load_test():
     
     data = request.get_json() or {}
     
-    config = {
-        'start_rate': int(data.get('start_rate', 1)),
-        'max_rate': int(data.get('max_rate', 50)),
-        'ramp_duration_seconds': int(data.get('ramp_duration_seconds', 60)),
-        'sustain_duration_seconds': int(data.get('sustain_duration_seconds', 60)),
-        'size_kb': float(data.get('size_kb', 1))
-    }
-    
-    load_test_active = True
-    load_test_thread = threading.Thread(target=run_load_test, args=(config,), daemon=True)
-    load_test_thread.start()
-    
-    return jsonify({
-        "status": "Load test started",
-        "config": config
-    })
+    try:
+        # Use value objects for validation (prevents invalid states)
+        load_config = LoadTestConfig.from_raw_input(data)
+        
+        config = {
+            'start_rate': load_config.start_rate.value,
+            'max_rate': load_config.max_rate.value,
+            'ramp_duration_seconds': load_config.ramp_duration.value,
+            'sustain_duration_seconds': load_config.sustain_duration.value,
+            'size_kb': load_config.size_kb.value
+        }
+        
+        load_test_active = True
+        load_test_thread = threading.Thread(target=run_load_test, args=(config,), daemon=True)
+        load_test_thread.start()
+        
+        return jsonify({
+            "status": "Load test started",
+            "config": config
+        })
+    except ValueError as e:
+        # OWASP A09: Safe error message (no stack trace to user)
+        print(f"Load test validation failed: {e}", flush=True)
+        return jsonify({"error": f"Invalid load test configuration: {str(e)}"}), 400
 
 @app.route('/loadtest/stop', methods=['POST'])
 def stop_load_test():

@@ -9,6 +9,23 @@ An interactive demonstration of a modern event streaming pipeline with observabl
 - **Failure Drills**: Guided scenarios to explore backpressure, buffering, and resilience patterns
 - **Non-blocking Monitoring**: Background scheduler refreshes metrics every 10 seconds
 - **Production-Ready Patterns**: Defensive coding, pure functions, comprehensive test coverage
+- **🆕 Clean Code Refactored**: OWASP Top 10 & SonarQube compliant (see [REFACTORING_COMPLETE.md](./REFACTORING_COMPLETE.md))
+
+## 🔒 Security & Code Quality
+
+This project has been refactored according to **Clean Developer** principles:
+
+- ✅ **OWASP A03**: Input validation with value objects (injection prevention)
+- ✅ **OWASP A05**: No hardcoded credentials (all config from environment)
+- ✅ **OWASP A09**: Secure logging (no sensitive data exposure)
+- ✅ **SonarQube**: Cyclomatic complexity < 5, no magic numbers, no code duplication
+- ✅ **Clean Code**: Single Responsibility, pure functions, immutable config
+- ✅ **55+ Tests**: Unit, integration, and security boundary tests
+
+**📚 Documentation:**
+- [Complete Refactoring Report](./REFACTORING_COMPLETE.md) - Detailed before/after analysis
+- [Clean Code Quick Reference](./CLEAN_CODE_GUIDE.md) - Security checklist & environment variables
+- [Producer Refactoring Notes](./components/producer/REFACTORING_NOTES.md) - Integration guide
 
 ## Architecture
 
