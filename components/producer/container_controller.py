@@ -27,7 +27,8 @@ def get_action_past_tense(action: str) -> str:
         'start': 'started',
         'restart': 'restarted',
         'pause': 'paused',
-        'unpause': 'unpaused'
+        'unpause': 'unpaused',
+        'kill': 'killed'
     }
     return past_tense.get(action, f"{action}ed")
 
@@ -46,7 +47,7 @@ def execute_docker_compose_command(service: str, action: str) -> Tuple[bool, str
     if not service:
         return False, "Service name cannot be empty"
     
-    if action not in ['stop', 'start', 'restart', 'pause', 'unpause']:
+    if action not in ['stop', 'start', 'restart', 'pause', 'unpause', 'kill']:
         return False, f"Invalid action: {action}"
     
     compose_file = get_compose_file_path()
@@ -128,8 +129,13 @@ def get_container_status(service: str) -> Dict[str, str]:
 
 
 def stop_service(service: str) -> Tuple[bool, str]:
-    """Stop a service."""
+    """Stop a service gracefully (will not auto-restart)."""
     return execute_docker_compose_command(service, 'stop')
+
+
+def kill_service(service: str) -> Tuple[bool, str]:
+    """Kill a service (simulates crash, will auto-restart with restart policy)."""
+    return execute_docker_compose_command(service, 'kill')
 
 
 def start_service(service: str) -> Tuple[bool, str]:

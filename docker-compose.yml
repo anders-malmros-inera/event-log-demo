@@ -13,7 +13,7 @@ services:
       - "--api.insecure=true"
   kafka:
     image: confluentinc/cp-kafka:7.4.0
-    restart: unless-stopped
+    restart: always
     volumes:
       - kafka-data:/var/lib/kafka/data
     environment:
@@ -22,6 +22,12 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     restart: unless-stopped
@@ -33,7 +39,7 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
   flink:
     image: flink:1.17.1-scala_2.12
-    restart: unless-stopped
+    restart: always
     command: jobmanager
     ports:
       - "8081:8081"
@@ -43,7 +49,7 @@ services:
         jobmanager.rpc.address: flink
   flink-taskmanager:
     image: flink:1.17.1-scala_2.12
-    restart: unless-stopped
+    restart: always
     command: taskmanager
     environment:
       - |
@@ -52,7 +58,7 @@ services:
         taskmanager.numberOfTaskSlots: 2
   cassandra:
     image: cassandra:4.0
-    restart: unless-stopped
+    restart: always
     ports:
       - "9042:9042"
     volumes:
@@ -136,7 +142,7 @@ services:
       - acceptance
   flink-job:
     build: ./components/flink-job
-    restart: unless-stopped
+    restart: always
     depends_on:
       cassandra:
         condition: service_healthy

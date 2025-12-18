@@ -58,8 +58,9 @@ public class FlinkLogProcessor {
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         
-        // Set parallelism to reduce connection pressure
-        env.setParallelism(2);
+        // Set parallelism to 1 to reduce connection pressure and resource requirements
+        // This ensures we don't exhaust Cassandra connections during chaos events
+        env.setParallelism(1);
 
         String kafkaBootstrapServers = "kafka:9092";
         String kafkaTopic = "event-logs";
@@ -97,18 +98,19 @@ public class FlinkLogProcessor {
             @Override
             protected Cluster buildCluster(Cluster.Builder builder) {
                 // Defensive pooling: limit connections to prevent exhaustion
+                // Reduced connection pool to prevent overwhelming Cassandra during chaos events
                 PoolingOptions poolingOptions = new PoolingOptions()
-                    .setConnectionsPerHost(HostDistance.LOCAL, 2, 4)
-                    .setConnectionsPerHost(HostDistance.REMOTE, 1, 2)
-                    .setMaxRequestsPerConnection(HostDistance.LOCAL, 512)
-                    .setMaxRequestsPerConnection(HostDistance.REMOTE, 256);
+                    .setConnectionsPerHost(HostDistance.LOCAL, 1, 2)  // Reduced from 2,4
+                    .setConnectionsPerHost(HostDistance.REMOTE, 1, 1)  // Reduced from 1,2
+                    .setMaxRequestsPerConnection(HostDistance.LOCAL, 256)  // Reduced from 512
+                    .setMaxRequestsPerConnection(HostDistance.REMOTE, 128);  // Reduced from 256
                 
-                // Socket timeouts to prevent hanging
+                // Extended timeouts to handle transient issues during chaos events
                 SocketOptions socketOptions = new SocketOptions()
-                    .setConnectTimeoutMillis(10000)
-                    .setReadTimeoutMillis(12000);
+                    .setConnectTimeoutMillis(30000)  // Increased from 10s to 30s
+                    .setReadTimeoutMillis(30000);    // Increased from 12s to 30s
                 
-                // Query timeouts
+                // Query timeouts with relaxed consistency
                 QueryOptions queryOptions = new QueryOptions()
                     .setConsistencyLevel(ConsistencyLevel.ONE);
                 
@@ -118,7 +120,7 @@ public class FlinkLogProcessor {
                     .withPoolingOptions(poolingOptions)
                     .withSocketOptions(socketOptions)
                     .withQueryOptions(queryOptions)
-                    .withReconnectionPolicy(new ConstantReconnectionPolicy(1000))
+                    .withReconnectionPolicy(new ConstantReconnectionPolicy(5000))  // Increased from 1s to 5s
                     .build();
             }
         };
@@ -127,6 +129,7 @@ public class FlinkLogProcessor {
                 .setQuery("INSERT INTO logs.events (uid, timestamp, payload) VALUES (?, ?, ?);")
                 .setClusterBuilder(clusterBuilder)
                 .setFailureHandler(new LoggingCassandraFailureHandler())
+                .setMaxConcurrentRequests(50)  // Limit concurrent requests to prevent overload
                 .build();
         
         // MinIO Sink for archival (defensive: write-and-forget pattern)

@@ -8,7 +8,7 @@ import random
 import threading
 import time
 from typing import Dict, List
-from container_controller import stop_service, start_service, restart_service, get_container_status
+from container_controller import start_service, restart_service, pause_service, unpause_service, get_container_status
 
 
 class ChaosNurse:
@@ -106,11 +106,14 @@ class ChaosNurse:
         current_state = status_info.get('status', 'unknown').lower()
         
         # Defensive: determine valid actions based on current state
-        # Running services: can stop or restart
+        # Running services: can pause (temporarily freeze) or restart (quick recovery)
+        # Paused services: can unpause to restore
         # Stopped/exited services: can start
         # Other states: skip to avoid invalid operations
         if current_state in ['running', 'up']:
-            valid_actions = ['stop', 'restart']
+            valid_actions = ['pause', 'restart']
+        elif current_state in ['paused']:
+            valid_actions = ['unpause']
         elif current_state in ['stopped', 'exited', 'created']:
             valid_actions = ['start']
         else:
@@ -130,7 +133,8 @@ class ChaosNurse:
         
         # Execute action with error handling
         action_map = {
-            'stop': stop_service,
+            'pause': pause_service,
+            'unpause': unpause_service,
             'start': start_service,
             'restart': restart_service
         }
